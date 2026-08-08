@@ -6,6 +6,7 @@ import ssl
 from dataclasses import dataclass
 from datetime import datetime, date, timedelta, time
 from email.message import EmailMessage
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -117,25 +118,35 @@ def parse_availability_response(response_json: Dict[str, Any]) -> List[Slot]:
     if not isinstance(availability, dict):
         return []
 
-    for date_key, shift_groups in availability.items():
+    for date_key, day_items in availability.items():
         day_date = parse_date(date_key)
-        if day_date is None or not isinstance(shift_groups, list):
+        if day_date is None or not isinstance(day_items, list):
             continue
-        for shift in shift_groups:
-            if not isinstance(shift, dict):
+        for item in day_items:
+            if not isinstance(item, dict):
                 continue
-            shift_category = shift.get("shift_category") or shift.get("name") or ""
-            for slot_item in shift.get("times", []):
+            for slot_item in item.get("times", []):
                 if not isinstance(slot_item, dict):
                     continue
                 if slot_item.get("type") != "book":
                     continue
-                time_string = slot_item.get("time") or slot_item.get("time_iso")
+                time_string = (
+                    slot_item.get("time")
+                    or slot_item.get("time_iso")
+                    or slot_item.get("real_datetime_of_slot")
+                    or slot_item.get("utc_datetime")
+                )
                 time_value = parse_time(time_string)
                 if time_value is None:
                     continue
-                description_value = slot_item.get("time") or slot_item.get("time_iso") or "available"
-                description = f"{shift_category} - {description_value}" if shift_category else str(description_value)
+                description_value = (
+                    slot_item.get("time")
+                    or slot_item.get("time_iso")
+                    or slot_item.get("real_datetime_of_slot")
+                    or slot_item.get("utc_datetime")
+                    or "available"
+                )
+                description = str(description_value)
                 slots.append(Slot(date=day_date, time=time_value, description=description))
 
     return sorted(slots, key=lambda s: (s.date, s.time, s.description))
@@ -187,6 +198,36 @@ def build_notification_message(slots: List[Slot], restaurant_url: str) -> str:
     return "\n".join(lines)
 
 
+def save_search_results(slots: List[Slot], result_dir: Path) -> Path:
+    result_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    result_path = result_dir / f"search_result_{timestamp}.json"
+    payload = {
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "slot_count": len(slots),
+        "slots": [
+            {
+                "date": slot.date.isoformat(),
+                "time": slot.time.strftime("%H:%M"),
+                "description": slot.description,
+            }
+            for slot in slots
+        ],
+    }
+    with result_path.open("w", encoding="utf-8") as result_file:
+        json.dump(payload, result_file, indent=2)
+    return result_path
+
+
+def save_raw_api_response(response_json: Dict[str, Any], raw_dir: Path, current_date: date) -> Path:
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"raw_response_{current_date.isoformat()}.json"
+    result_path = raw_dir / filename
+    with result_path.open("w", encoding="utf-8") as result_file:
+        json.dump(response_json, result_file, indent=2)
+    return result_path
+
+
 def main() -> int:
     api_base_url, venue, restaurant_url, start_date, end_date, time_windows, party_size = get_target_config()
     print(f"Checking SevenRooms availability for {restaurant_url}")
@@ -197,10 +238,13 @@ def main() -> int:
     print(f"Party size: {party_size}")
 
     slots: List[Slot] = []
+    raw_dir = Path(get_env("RAW_RESULT_DIR", "search_result/raw"))
     for current_date in date_range(start_date, end_date):
         print(f"Requesting availability for {current_date.isoformat()}")
         try:
             response_json = fetch_availability_json(api_base_url, venue, current_date, 1, party_size)
+            saved_raw_path = save_raw_api_response(response_json, raw_dir, current_date)
+            print(f"Saved raw API response to {saved_raw_path}")
         except Exception as exc:
             print(f"Failed to fetch availability from SevenRooms API for {current_date.isoformat()}: {exc}")
             continue
@@ -226,6 +270,10 @@ def main() -> int:
     print("Found candidate reservation slots:")
     for slot in filtered_slots:
         print(f"- {slot.date.isoformat()} {slot.time.strftime('%I:%M %p')} — {slot.description}")
+
+    result_dir = Path(get_env("SEARCH_RESULT_DIR", "search_result"))
+    result_path = save_search_results(filtered_slots, result_dir)
+    print(f"Saved search results to {result_path}")
 
     notification_message = build_notification_message(filtered_slots, restaurant_url)
 

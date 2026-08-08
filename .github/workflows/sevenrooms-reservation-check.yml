@@ -28,7 +28,6 @@ jobs:
           END_DATE: 2026-08-30
           TIME_WINDOWS: dinner
           PARTY_SIZE: '2'
-          NUM_DAYS: '4'
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           EMAIL_TO: ${{ secrets.RESERVATION_EMAIL_TO }}
           EMAIL_FROM: ${{ secrets.RESERVATION_EMAIL_FROM }}
