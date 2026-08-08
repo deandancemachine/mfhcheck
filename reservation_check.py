@@ -60,6 +60,15 @@ def parse_time(value: Optional[str]) -> Optional[time]:
     return None
 
 
+def date_range(start_date: date, end_date: date) -> List[date]:
+    days: List[date] = []
+    current = start_date
+    while current <= end_date:
+        days.append(current)
+        current += timedelta(days=1)
+    return days
+
+
 def get_env(name: str, default: Optional[str] = None) -> Optional[str]:
     value = os.environ.get(name)
     if value is not None:
@@ -67,12 +76,12 @@ def get_env(name: str, default: Optional[str] = None) -> Optional[str]:
     return default
 
 
-def get_target_config() -> Tuple[str, str, str, date, date, List[str], int, int]:
+def get_target_config() -> Tuple[str, str, str, date, date, List[str], int]:
     api_base_url = get_env("SEVENROOMS_API_BASE_URL", SEVENROOMS_API_BASE_URL)
     venue = get_env("SEVENROOMS_VENUE", DEFAULT_VENUE)
     restaurant_url = get_env("SEVENROOMS_RESTAURANT_URL", DEFAULT_RESTAURANT_URL)
-    start_date = parse_date(get_env("START_DATE", "2026-08-27"))
-    end_date = parse_date(get_env("END_DATE", "2026-08-30"))
+    start_date = parse_date(get_env("START_DATE", "2026-11-27"))
+    end_date = parse_date(get_env("END_DATE", "2026-11-30"))
     if not start_date or not end_date:
         raise ValueError("START_DATE and END_DATE must be set in YYYY-MM-DD format.")
     if end_date < start_date:
@@ -82,14 +91,7 @@ def get_target_config() -> Tuple[str, str, str, date, date, List[str], int, int]
     if not time_windows:
         time_windows = ["dinner"]
     party_size = int(get_env("PARTY_SIZE", "2"))
-    num_days_env = get_env("NUM_DAYS")
-    if num_days_env:
-        num_days = int(num_days_env)
-        if num_days <= 0:
-            raise ValueError("NUM_DAYS must be a positive integer.")
-    else:
-        num_days = (end_date - start_date).days + 1
-    return api_base_url, venue, restaurant_url, start_date, end_date, time_windows, party_size, num_days
+    return api_base_url, venue, restaurant_url, start_date, end_date, time_windows, party_size
 
 
 def fetch_availability_json(api_base_url: str, venue: str, start_date: date, num_days: int, party_size: int) -> Dict[str, Any]:
@@ -186,27 +188,34 @@ def build_notification_message(slots: List[Slot], restaurant_url: str) -> str:
 
 
 def main() -> int:
-    api_base_url, venue, restaurant_url, start_date, end_date, time_windows, party_size, num_days = get_target_config()
+    api_base_url, venue, restaurant_url, start_date, end_date, time_windows, party_size = get_target_config()
     print(f"Checking SevenRooms availability for {restaurant_url}")
     print(f"API base URL: {api_base_url}")
     print(f"Venue: {venue}")
     print(f"Dates: {start_date.isoformat()} -> {end_date.isoformat()}")
     print(f"Time windows: {', '.join(time_windows)}")
     print(f"Party size: {party_size}")
-    print(f"Request range: {num_days} day(s)")
 
-    try:
-        response_json = fetch_availability_json(api_base_url, venue, start_date, num_days, party_size)
-    except Exception as exc:
-        print(f"Failed to fetch availability from SevenRooms API: {exc}")
-        return 1
+    slots: List[Slot] = []
+    for current_date in date_range(start_date, end_date):
+        print(f"Requesting availability for {current_date.isoformat()}")
+        try:
+            response_json = fetch_availability_json(api_base_url, venue, current_date, 1, party_size)
+        except Exception as exc:
+            print(f"Failed to fetch availability from SevenRooms API for {current_date.isoformat()}: {exc}")
+            continue
 
-    slots = parse_availability_response(response_json)
+        day_slots = parse_availability_response(response_json)
+        if not day_slots:
+            print(f"No availability slots were found for {current_date.isoformat()}.")
+            status = response_json.get("status")
+            if status is not None:
+                print(f"API status: {status}")
+            continue
+        slots.extend(day_slots)
+
     if not slots:
-        print("No availability slots were found in the API response.")
-        status = response_json.get("status")
-        if status is not None:
-            print(f"API status: {status}")
+        print("No availability slots were found in the requested date range.")
         return 0
 
     filtered_slots = filter_slots(slots, time_windows, start_date, end_date)
