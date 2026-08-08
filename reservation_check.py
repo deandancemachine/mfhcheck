@@ -1,15 +1,14 @@
+# sample call https://www.sevenrooms.com/api-yoa/availability/ng/widget/range?venue=mamasfishhouserestaurantinn&party_size=2&halo_size_interval=100&start_date=2026-11-01&num_days=1&channel=SEVENROOMS_WIDGET&exclude_pdr=true&intent=user_search
 import json
 import os
-import re
 import smtplib
 import ssl
 from dataclasses import dataclass
 from datetime import datetime, date, timedelta, time
 from email.message import EmailMessage
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
-from bs4 import BeautifulSoup
 
 TIME_WINDOWS = {
     "breakfast": (time(6, 0), time(10, 59)),
@@ -22,6 +21,10 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/125.0.6422.140 Safari/537.36"
 )
 
+SEVENROOMS_API_BASE_URL = "https://www.sevenrooms.com/api-yoa/availability/ng/widget/range"
+DEFAULT_VENUE = "mamasfishhouserestaurantinn"
+DEFAULT_RESTAURANT_URL = "https://mamasfishhouse.sevenrooms.com"
+
 
 @dataclass
 class Slot:
@@ -30,7 +33,9 @@ class Slot:
     description: str
 
 
-def parse_date(value: str) -> Optional[date]:
+def parse_date(value: Optional[str]) -> Optional[date]:
+    if not isinstance(value, str):
+        return None
     for fmt in ["%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y"]:
         try:
             return datetime.strptime(value.strip(), fmt).date()
@@ -39,8 +44,10 @@ def parse_date(value: str) -> Optional[date]:
     return None
 
 
-def parse_time(value: str) -> Optional[time]:
-    for fmt in ["%I:%M %p", "%I:%M%p", "%H:%M", "%H:%M:%S"]:
+def parse_time(value: Optional[str]) -> Optional[time]:
+    if not isinstance(value, str):
+        return None
+    for fmt in ["%I:%M %p", "%I:%M%p", "%H:%M", "%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %I:%M:%S"]:
         try:
             return datetime.strptime(value.strip(), fmt).time()
         except ValueError:
@@ -53,13 +60,6 @@ def parse_time(value: str) -> Optional[time]:
     return None
 
 
-def date_range(start_date: date, end_date: date) -> Iterable[date]:
-    current = start_date
-    while current <= end_date:
-        yield current
-        current += timedelta(days=1)
-
-
 def get_env(name: str, default: Optional[str] = None) -> Optional[str]:
     value = os.environ.get(name)
     if value is not None:
@@ -67,161 +67,76 @@ def get_env(name: str, default: Optional[str] = None) -> Optional[str]:
     return default
 
 
-def get_target_config() -> Tuple[str, date, date, List[str], int]:
-    restaurant_url = get_env("SEVENROOMS_RESTAURANT_URL", "https://mamasfishhouse.sevenrooms.com")
+def get_target_config() -> Tuple[str, str, str, date, date, List[str], int, int]:
+    api_base_url = get_env("SEVENROOMS_API_BASE_URL", SEVENROOMS_API_BASE_URL)
+    venue = get_env("SEVENROOMS_VENUE", DEFAULT_VENUE)
+    restaurant_url = get_env("SEVENROOMS_RESTAURANT_URL", DEFAULT_RESTAURANT_URL)
     start_date = parse_date(get_env("START_DATE", "2026-08-27"))
     end_date = parse_date(get_env("END_DATE", "2026-08-30"))
     if not start_date or not end_date:
         raise ValueError("START_DATE and END_DATE must be set in YYYY-MM-DD format.")
+    if end_date < start_date:
+        raise ValueError("END_DATE must not be before START_DATE.")
     windows = get_env("TIME_WINDOWS", "dinner")
     time_windows = [window.strip().lower() for window in windows.split(",") if window.strip()]
     if not time_windows:
         time_windows = ["dinner"]
     party_size = int(get_env("PARTY_SIZE", "2"))
-    return restaurant_url, start_date, end_date, time_windows, party_size
+    num_days_env = get_env("NUM_DAYS")
+    if num_days_env:
+        num_days = int(num_days_env)
+        if num_days <= 0:
+            raise ValueError("NUM_DAYS must be a positive integer.")
+    else:
+        num_days = (end_date - start_date).days + 1
+    return api_base_url, venue, restaurant_url, start_date, end_date, time_windows, party_size, num_days
 
 
-def fetch_html(url: str) -> str:
-    response = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=30)
+def fetch_availability_json(api_base_url: str, venue: str, start_date: date, num_days: int, party_size: int) -> Dict[str, Any]:
+    params = {
+        "venue": venue,
+        "party_size": str(party_size),
+        "halo_size_interval": "100",
+        "start_date": start_date.isoformat(),
+        "num_days": str(num_days),
+        "channel": "SEVENROOMS_WIDGET",
+        "exclude_pdr": "true",
+        "intent": "user_search",
+    }
+    response = requests.get(api_base_url,  params=params, timeout=30)
+    # headers={"User-Agent": USER_AGENT}
     response.raise_for_status()
-    return response.text
+    return response.json()
 
 
-def extract_json_strings(html: str) -> List[str]:
-    soup = BeautifulSoup(html, "html.parser")
-    json_strings: List[str] = []
-
-    for script in soup.find_all("script"):
-        if script.string is None:
-            continue
-        text = script.string.strip()
-        if text.startswith("{") or text.startswith("["):
-            json_strings.append(text)
-
-        match = re.search(r"window\.__INITIAL_STATE__\s*=\s*({.*?});\s*$", text, re.DOTALL)
-        if match:
-            json_strings.append(match.group(1))
-
-        match = re.search(r"=\s*({\s*\".*?\s*\})\s*;", text, re.DOTALL)
-        if match and len(match.group(1)) < 500000:
-            candidate = match.group(1)
-            if candidate.count("\"") > 4:
-                json_strings.append(candidate)
-
-    return json_strings
-
-
-def parse_json_text(text: str) -> Optional[Any]:
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return None
-
-
-def flatten_json(data: Any) -> Iterable[Any]:
-    if isinstance(data, dict):
-        yield data
-        for value in data.values():
-            yield from flatten_json(value)
-    elif isinstance(data, list):
-        for item in data:
-            yield from flatten_json(item)
-
-
-def find_slot_sources(data: Any) -> List[Dict[str, Any]]:
-    sources: List[Dict[str, Any]] = []
-    if isinstance(data, dict):
-        if any(key in data for key in ("slots", "availability", "availabilities", "timeSlots", "reservationSlots", "time_slots")):
-            sources.append(data)
-        for value in data.values():
-            sources.extend(find_slot_sources(value))
-    elif isinstance(data, list):
-        for item in data:
-            sources.extend(find_slot_sources(item))
-    return sources
-
-
-def parse_slot_objects(source: Dict[str, Any]) -> List[Slot]:
+def parse_availability_response(response_json: Dict[str, Any]) -> List[Slot]:
     slots: List[Slot] = []
-    for key in ("slots", "availabilities", "timeSlots", "reservationSlots", "time_slots"):
-        if key not in source:
+    availability = response_json.get("data", {}).get("availability", {})
+    if not isinstance(availability, dict):
+        return []
+
+    for date_key, shift_groups in availability.items():
+        day_date = parse_date(date_key)
+        if day_date is None or not isinstance(shift_groups, list):
             continue
-        items = source[key]
-        if not isinstance(items, list):
-            continue
-        for item in items:
-            slot = parse_slot_item(item)
-            if slot:
-                slots.append(slot)
-    return slots
+        for shift in shift_groups:
+            if not isinstance(shift, dict):
+                continue
+            shift_category = shift.get("shift_category") or shift.get("name") or ""
+            for slot_item in shift.get("times", []):
+                if not isinstance(slot_item, dict):
+                    continue
+                if slot_item.get("type") != "book":
+                    continue
+                time_string = slot_item.get("time") or slot_item.get("time_iso")
+                time_value = parse_time(time_string)
+                if time_value is None:
+                    continue
+                description_value = slot_item.get("time") or slot_item.get("time_iso") or "available"
+                description = f"{shift_category} - {description_value}" if shift_category else str(description_value)
+                slots.append(Slot(date=day_date, time=time_value, description=description))
 
-
-def parse_slot_item(item: Any) -> Optional[Slot]:
-    if not isinstance(item, dict):
-        return None
-    date_value = None
-    time_value = None
-    description = ""
-
-    for key in ("date", "bookingDate", "arrivalDate", "startDate", "day"):
-        if key in item:
-            if isinstance(item[key], str):
-                date_value = parse_date(item[key])
-            elif isinstance(item[key], int):
-                try:
-                    date_value = datetime.utcfromtimestamp(item[key]).date()
-                except Exception:
-                    pass
-
-    for key in ("time", "startTime", "slot", "start"):
-        if key in item and isinstance(item[key], str):
-            time_value = parse_time(item[key])
-        elif key in item and isinstance(item[key], int):
-            try:
-                time_value = datetime.utcfromtimestamp(item[key]).time()
-            except Exception:
-                pass
-
-    if not date_value and isinstance(item.get("datetime"), str):
-        try:
-            parsed = datetime.fromisoformat(item["datetime"].rstrip("Z"))
-            date_value = parsed.date()
-            time_value = parsed.time()
-        except ValueError:
-            pass
-
-    if not time_value and isinstance(item.get("datetime"), str):
-        try:
-            parsed = datetime.fromisoformat(item["datetime"].rstrip("Z"))
-            time_value = parsed.time()
-        except ValueError:
-            pass
-
-    if not date_value and not time_value:
-        if isinstance(item.get("slot"), dict):
-            inner = item["slot"]
-            return parse_slot_item(inner)
-
-    if date_value and time_value:
-        description = item.get("label") or item.get("text") or item.get("displayTime") or item.get("name") or "available"
-        return Slot(date=date_value, time=time_value, description=str(description))
-    return None
-
-
-def extract_slots_from_html(html: str) -> List[Slot]:
-    slots: List[Slot] = []
-    for json_text in extract_json_strings(html):
-        data = parse_json_text(json_text)
-        if data is None:
-            continue
-        for node in flatten_json(data):
-            slot_sources = find_slot_sources(node)
-            for source in slot_sources:
-                slots.extend(parse_slot_objects(source))
-    unique_slots: Dict[Tuple[date, time, str], Slot] = {}
-    for slot in slots:
-        unique_slots[(slot.date, slot.time, slot.description)] = slot
-    return sorted(unique_slots.values(), key=lambda s: (s.date, s.time))
+    return sorted(slots, key=lambda s: (s.date, s.time, s.description))
 
 
 def filter_slots(slots: List[Slot], windows: List[str], start_date: date, end_date: date) -> List[Slot]:
@@ -271,25 +186,27 @@ def build_notification_message(slots: List[Slot], restaurant_url: str) -> str:
 
 
 def main() -> int:
-    restaurant_url, start_date, end_date, time_windows, party_size = get_target_config()
+    api_base_url, venue, restaurant_url, start_date, end_date, time_windows, party_size, num_days = get_target_config()
     print(f"Checking SevenRooms availability for {restaurant_url}")
+    print(f"API base URL: {api_base_url}")
+    print(f"Venue: {venue}")
     print(f"Dates: {start_date.isoformat()} -> {end_date.isoformat()}")
     print(f"Time windows: {', '.join(time_windows)}")
     print(f"Party size: {party_size}")
+    print(f"Request range: {num_days} day(s)")
 
     try:
-        html = fetch_html(restaurant_url)
+        response_json = fetch_availability_json(api_base_url, venue, start_date, num_days, party_size)
     except Exception as exc:
-        print(f"Failed to fetch restaurant page: {exc}")
+        print(f"Failed to fetch availability from SevenRooms API: {exc}")
         return 1
 
-    slots = extract_slots_from_html(html)
+    slots = parse_availability_response(response_json)
     if not slots:
-        print("No slots were parsed from the page HTML. Trying a conservative text search fallback.")
-        if "no availability" in html.lower():
-            print("Page contains a clear no-availability message.")
-        else:
-            print("No JSON availability payload was detected. The site may require a JavaScript-powered request or a different API path.")
+        print("No availability slots were found in the API response.")
+        status = response_json.get("status")
+        if status is not None:
+            print(f"API status: {status}")
         return 0
 
     filtered_slots = filter_slots(slots, time_windows, start_date, end_date)
