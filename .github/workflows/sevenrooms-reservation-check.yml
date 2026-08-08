@@ -2,7 +2,7 @@ name: SevenRooms Reservation Monitor
 
 on:
   schedule:
-    - cron: '0 12 * * *'
+    - cron: '*/15 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -29,6 +29,7 @@ jobs:
           TIME_WINDOWS: dinner
           PARTY_SIZE: '2'
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           EMAIL_TO: ${{ secrets.RESERVATION_EMAIL_TO }}
           EMAIL_FROM: ${{ secrets.RESERVATION_EMAIL_FROM }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}

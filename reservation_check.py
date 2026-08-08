@@ -172,6 +172,12 @@ def send_slack_message(webhook_url: str, message: str) -> None:
     response.raise_for_status()
 
 
+def send_discord_message(webhook_url: str, message: str) -> None:
+    payload = {"content": message}
+    response = requests.post(webhook_url, json=payload, headers={"User-Agent": USER_AGENT}, timeout=15)
+    response.raise_for_status()
+
+
 def send_email(smtp_host: str, smtp_port: int, smtp_user: str, smtp_password: str, sender: str, recipient: str, subject: str, body: str) -> None:
     message = EmailMessage()
     message["From"] = sender
@@ -230,6 +236,11 @@ def save_raw_api_response(response_json: Dict[str, Any], raw_dir: Path, current_
 
 def main() -> int:
     api_base_url, venue, restaurant_url, start_date, end_date, time_windows, party_size = get_target_config()
+    today = date.today()
+    if today > end_date:
+        print(f"Current date {today.isoformat()} is after END_DATE {end_date.isoformat()}. Exiting.")
+        return 0
+
     print(f"Checking SevenRooms availability for {restaurant_url}")
     print(f"API base URL: {api_base_url}")
     print(f"Venue: {venue}")
@@ -287,6 +298,15 @@ def main() -> int:
         except Exception as exc:
             print(f"Failed to send Slack notification: {exc}")
 
+    discord_url = get_env("DISCORD_WEBHOOK_URL")
+    if discord_url:
+        try:
+            send_discord_message(discord_url, notification_message)
+            print("Discord notification sent.")
+            sent_notifications += 1
+        except Exception as exc:
+            print(f"Failed to send Discord notification: {exc}")
+
     smtp_host = get_env("SMTP_HOST")
     smtp_port = int(get_env("SMTP_PORT", "465"))
     smtp_user = get_env("SMTP_USER")
@@ -311,7 +331,7 @@ def main() -> int:
             print(f"Failed to send email notification: {exc}")
 
     if sent_notifications == 0:
-        print("No external notification method was configured. Set SLACK_WEBHOOK_URL or SMTP_* and EMAIL_* secrets.")
+        print("No external notification method was configured. Set SLACK_WEBHOOK_URL, DISCORD_WEBHOOK_URL, or SMTP_* and EMAIL_* secrets.")
     return 0
 
 
